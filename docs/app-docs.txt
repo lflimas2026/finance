@@ -1,0 +1,89 @@
+================================================================================
+DOCUMENTAÇÃO VIVA DO PROJETO — FINANÇASPRO (CONTROLE FINANCEIRO PESSOAL)
+Arquivo: docs/app-docs.txt
+================================================================================
+
+1. OBJETIVO E CONTEXTO
+- Aplicação web responsiva (mobile e desktop via navegador) em português do Brasil (pt-BR).
+- Foco central: visibilidade total sobre débitos, vencimentos, parcelas a vencer e saldo previsto (receitas menos despesas) de qualquer mês, respondendo com precisão quanto dinheiro é necessário ter em conta em cada mês.
+- Moeda: Real (R$), armazenada em centavos (inteiro) no banco de dados e formatada em R$ apenas na interface.
+- Datas: exibidas em dd/mm/aaaa, calculadas sempre no fuso America/Sao_Paulo.
+
+2. STACK TECNOLÓGICA
+- Frontend: Vite + React 18 + TypeScript + TailwindCSS + componentes baseados em shadcn/ui + Lucide Icons.
+- Roteamento: React Router v6 (com suporte a SPA routing em `public/_redirects`).
+- Estado Assíncrono e Cache: TanStack Query v5.
+- Backend & Auth: Supabase (@supabase/supabase-js) com autenticação por e-mail/senha e PostgreSQL com Row Level Security (RLS).
+- Variáveis de Ambiente: VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY lidas de .env.local (ignorado no .gitignore) com modelo em .env.example. Inclui também fallback/Modo Local automático em LocalStorage caso as chaves ainda não estejam preenchidas.
+- Deploy: Cloudflare Pages (build estático gerado pelo Vite em dist/).
+
+3. MODELO DE DADOS (supabase/schema.sql)
+Tabelas com RLS ativado e policies restritas a (user_id = auth.uid()):
+- categorias: id, user_id, nome, cor
+- parcelamentos: id, user_id, descricao, valor_parcela_centavos, total_parcelas, primeira_parcela_data, categoria_id
+- recorrencias: id, user_id, tipo ('receita' | 'despesa'), descricao, valor_centavos, dia_do_mes, data_inicio, data_fim (opcional), categoria_id, ativa
+- lancamentos: id, user_id, tipo ('receita' | 'despesa'), descricao, valor_previsto_centavos, valor_real_centavos (opcional), data_vencimento, status ('pendente' | 'pago' | 'recebido'), data_pagamento, origem ('avulso' | 'parcelamento' | 'recorrencia'), parcelamento_id, numero_parcela, recorrencia_id, categoria_id
+- Índices criados: (user_id, data_vencimento) em lancamentos, além de índices por user_id, parcelamento_id e recorrencia_id.
+
+4. REGRAS DE NEGÓCIO CENTRAIS
+- Cada parcela de um parcelamento é um lançamento individual na tabela `lancamentos` (uma linha por vencimento).
+- Toda projeção mensal é a soma real dos lançamentos daquele mês.
+- Atrasado = lançamento com `status = 'pendente'` e `data_vencimento < hoje` (no fuso America/Sao_Paulo). É calculado dinamicamente sem salvar 'atrasado' no banco.
+- Ao gerar vencimentos mensais (parcelamentos ou recorrências), se o dia não existir no mês alvo (ex.: dia 31 em fevereiro ou abril), utiliza-se o último dia do mês (`buildMonthlyDateClamped` / `addMonthsClamped`).
+
+5. HISTÓRICO DE FASES IMPLEMENTADAS
+[CONCLUÍDA] Fase 1 — Base:
+- Projeto Vite + React + TypeScript + TailwindCSS configurado.
+- Schema SQL completo e idempotente em `supabase/schema.sql`.
+- Autenticação com Supabase Auth (login/cadastro) + modo local instantâneo.
+- Layout responsivo: Sidebar no desktop e barra de navegação inferior no mobile (Dashboard, Mês, Projeção, Parcelamentos, Calendário), modo escuro com persistência.
+- Seed automático no primeiro acesso das 10 categorias padrão editáveis (Moradia, Alimentação, Transporte, Saúde, Educação, Lazer, Cartão, Dívidas, Assinaturas, Outros).
+
+[CONCLUÍDA] Fase 2 — Lançamentos e Tela Mês:
+- Botão "+" flutuante global (e botão na sidebar/cabeçalho) abrindo o modal `NovoLancamentoModal`.
+- Tela Mês (`src/pages/MesPage.tsx`):
+  - Navegação por setas (mês anterior/próximo), seletor de ano e barra com os 12 meses indicando visualmente (ponto colorido) quais meses têm lançamentos e se há atrasados.
+  - 5 cartões de resumo: Receitas previstas, Despesas previstas, Saldo previsto (verde quando positivo/zero, vermelho quando negativo), Já pago e Falta pagar.
+  - Lista ordenada por `data_vencimento` exibindo descrição, badge `"parcela X/Y"` quando aplicável, categoria com cor, vencimento em `dd/mm/aaaa`, valor e status.
+  - Destaque em vermelho para lançamentos atrasados (`status === 'pendente'` e `data_vencimento < hoje`).
+  - Marcação como pago/recebido com 1 toque (preenchendo a data de hoje em `America/Sao_Paulo`, com edição rápida da data direto na linha ou pelo modal de edição).
+  - Edição completa e exclusão com confirmação.
+  - Filtros combináveis por tipo (Todos, Despesas, Receitas), status (Todos, Pendentes, Atrasados, Pagos/Recebidos) e categoria.
+
+[CONCLUÍDA] Fase 3 — Parcelamentos (suporte a 100+ parcelas):
+- Cadastro de parcelamentos com suporte a até 600 parcelas nos modos:
+  - "Do início": gera da parcela 1/N até N/N a partir da data da 1ª parcela.
+  - "Já em andamento": informa a parcela atual (ex.: 12 de 36) e a data do próximo vencimento, gerando em lote apenas as parcelas restantes (12/36 até 36/36) com a numeração exata e respeitando o último dia do mês (`addMonthsClamped` no fuso `America/Sao_Paulo`).
+- Tela de Parcelamentos (`src/pages/ParcelamentosPage.tsx`):
+  - Cartões de resumo geral (saldo restante em parcelas, parcelamentos em andamento, total de parcelas restantes).
+  - Lista de parcelamentos com barra de progresso (`pagas / total_parcelas` e percentual, contabilizando também as parcelas anteriores quando cadastrado em andamento), valor restante, previsão de quitação (mês/ano e data da última parcela) e valor base da parcela.
+  - Ao abrir um parcelamento, lista todas as parcelas com status (`Pendente`, `Atrasada`, `Paga`) e oferece as ações:
+    1. Editar o valor de uma parcela específica.
+    2. Adiar uma parcela (+1 mês com ajuste de fim de mês ou escolha de nova data).
+    3. Selecionar várias parcelas (ou todas as pendentes) e marcar como pagas de uma vez (antecipar/quitar em lote com escolha da data de pagamento).
+    4. Excluir o parcelamento inteiro (com modal de confirmação explícita, removendo todas as parcelas vinculadas).
+
+[CONCLUÍDA] Fase 4 — Recorrências e Receitas:
+- No modal global `NovoLancamentoModal` (`src/pages/MesPage.tsx`), as abas de Despesa e Receita possuem o seletor **"Despesa fixa (todo mês)"** / **"Receita fixa (todo mês)"**, com campos de descrição, valor mensal, categoria, dia do mês (1 a 31), data de início e data de fim (opcional).
+- Geração automática de lançamentos para os próximos 24 meses ao criar a recorrência e extensão automática ao abrir o app (`syncRecorrencias24Meses`), sem duplicar meses já existentes e respeitando o último dia do mês (`buildMonthlyDateClamped` no fuso `America/Sao_Paulo`).
+- Tela "Recorrências" (`src/pages/RecorrenciasPage.tsx`) para listar, criar, editar, pausar, retomar e encerrar recorrências:
+  - Encerrar mantém os lançamentos já pagos/recebidos no histórico e remove os futuros pendentes.
+  - Ao editar o valor de uma recorrência, pergunta explicitamente se vale **só para os próximos lançamentos ainda não gerados** ou **também para os já gerados pendentes**.
+- Receitas fixas e variáveis lado a lado por mês, marcando como `"recebido"` e mostrando **Valor Previsto** e **Valor Realizado** lado a lado.
+- Exclusão inteligente na tela Mês (`ExcluirLancamentoModal` / `deleteLancamentoComEscopo`):
+  - Quando o lançamento veio de **parcelamento**, pergunta se deseja excluir **"Só esta parcela"**, **"Esta e as próximas parcelas"** ou **"O parcelamento inteiro"**. Se todas as parcelas de um parcelamento forem excluídas, o parcelamento órfão é removido automaticamente (`cleanupOrphanParcelamento`).
+  - Quando o lançamento veio de **recorrência**, pergunta se deseja excluir **"Só este lançamento"** ou **"Este e os próximos pendentes (Encerrar recorrência)"**.
+
+[CONCLUÍDA] Fase 5 — Projeção, Dashboard e Calendário (`src/pages/Fase5Pages.tsx`):
+- Projeção (`/projecao`):
+  - Cartões fixos em destaque: *"Preciso ter em conta neste mês: R$ X"* e *"Preciso ter no próximo mês: R$ Y"*.
+  - Gráfico de barras com a evolução das despesas mensais (destacando a fatia de parcelamentos vs. despesas fixas/avulsas para visualizar a queda quando parcelamentos terminam).
+  - Tabela de todos os meses de hoje em diante que tenham algum lançamento, exibindo mês, total de receitas, total de despesas, falta pagar e saldo previsto (negativo em vermelho, positivo em verde). Clicar em qualquer mês (na tabela ou no gráfico) abre a tela Mês daquele período (`/mes?ym=YYYY-MM`).
+- Dashboard (`/` — tela inicial):
+  - Resumo do mês atual (Total a pagar, Já pago, Falta pagar, Receitas previstas e Saldo previsto).
+  - Listas *"Atrasados"* e *"Vencendo nos próximos 7 dias"* com o somatório total de cada uma e ação rápida de 1 toque para pagar/receber.
+  - Lista de próximas parcelas a vencer com numeração (ex.: *"Notebook, parcela 14/36, R$ 289,00, vence dia 20"*).
+  - Atalho direto para a Projeção e para a tela Mês.
+- Calendário (`/calendario`):
+  - Visão mensal em grade com indicadores coloridos por dia (verde para pago/recebido, amarelo/âmbar para pendente e vermelho para atrasado) e o total de despesas do dia.
+  - Clicar em qualquer dia lista abaixo todos os lançamentos daquela data com ação de 1 toque para quitar/reabrir.
